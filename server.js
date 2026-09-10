@@ -119,6 +119,7 @@ function armReveal(room) {
     if (!r || r.state.phase !== "open") return;
     r.state = { ...r.state, phase: "revealed" };
     toRoom(r.id, { t: "state", ...r.state });
+    sendKey(r);
     toRoom(r.id, { t: "roster", people: Object.values(r.people) }, true);
     markSnapshot();
   }, fireIn));
@@ -160,6 +161,18 @@ function deckFor(room, peran) {
         })),
     })),
   };
+}
+
+/* Participants only learn the key once answering has closed. */
+function sendKey(room) {
+  const inj = room.deck.injects[room.state.activeIdx];
+  if (!inj) return;
+  const key = {};
+  inj.questions.forEach((q) => {
+    const i = (q.choices || []).findIndex((c) => c.correct);
+    if (i >= 0) key[q.qid] = { i, text: q.choices[i].text };
+  });
+  toRoom(room.id, { t: "key", injectId: inj.id, key });
 }
 
 /* Quizizz-style: correct answers earn full points, faster ones earn more. */
@@ -275,6 +288,7 @@ wss.on("connection", (ws) => {
         send(ws, { t: "joined", pid: m.pid, roomId: room.id, peran: me.peran,
           deck: deckFor(room, me.peran), state: room.state,
           settings: room.settings, me });
+        if (room.state.phase === "revealed") sendKey(room);
         break;
       }
 
@@ -287,6 +301,7 @@ wss.on("connection", (ws) => {
           limit: inj0 ? limitFor(byId, inj0.id) : byId.settings.timeLimit };
         toRoom(byId.id, { t: "state", ...byId.state });
         if (m.phase === "open") armReveal(byId); else clearReveal(byId.id);
+        if (m.phase === "revealed") sendKey(byId);
         markDirty(byId.id);
         markSnapshot();
         break;
@@ -307,13 +322,12 @@ wss.on("connection", (ws) => {
         for (const [qid, val] of Object.entries(m.answers || {})) {
           const q = inj?.questions.find((x) => x.qid === qid);
           if (!q || q.peran !== p.peran) continue;
-          if (p.answers[qid]?.locked) continue; // one shot per question in auto mode
-
           if (q.type === "choice" && room.settings.mode === "auto") {
             const idx = Number(val);
             const { correct, points } = scoreAnswer(room, q, idx, elapsed, limit);
+            const prev = p.answers[qid];
             p.answers[qid] = { choice: idx, text: q.choices[idx]?.text || "",
-              ms: elapsed, correct, points, locked: true };
+              ms: elapsed, correct, points, changed: (prev?.changed || 0) + (prev ? 1 : 0) };
           } else {
             const text = String(val).trim();
             if (!text) continue;
@@ -328,6 +342,17 @@ wss.on("connection", (ws) => {
         }
         p.total = Object.values(p.answers).reduce((a, b) => a + (b.points || 0), 0);
         send(ws, { t: "ack", me: p });
+        markDirty(room.id);
+        markSnapshot();
+        break;
+      }
+
+      case "leave": {
+        const room = byId;
+        if (!room) return send(ws, { t: "left" });
+        delete room.people[m.pid];
+        sockets.set(ws, {});
+        send(ws, { t: "left" });
         markDirty(room.id);
         markSnapshot();
         break;
