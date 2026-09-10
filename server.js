@@ -117,9 +117,8 @@ function armReveal(room) {
   revealTimers.set(room.id, setTimeout(() => {
     const r = rooms.get(room.id);
     if (!r || r.state.phase !== "open") return;
-    r.state = { ...r.state, phase: "revealed" };
+    r.state = { ...r.state, phase: "revealed", keyShown: false };
     toRoom(r.id, { t: "state", ...r.state });
-    sendKey(r);
     toRoom(r.id, { t: "roster", people: Object.values(r.people) }, true);
     markSnapshot();
   }, fireIn));
@@ -275,6 +274,7 @@ wss.on("connection", (ws) => {
         send(ws, { t: "joined", pid, roomId: room.id, peran: hit.peran,
           deck: deckFor(room, hit.peran), state: room.state,
           settings: room.settings, me: room.people[pid] });
+        if (room.state.keyShown) sendKey(room); // joined after the key went out
         markDirty(room.id);
         markSnapshot();
         break;
@@ -288,7 +288,7 @@ wss.on("connection", (ws) => {
         send(ws, { t: "joined", pid: m.pid, roomId: room.id, peran: me.peran,
           deck: deckFor(room, me.peran), state: room.state,
           settings: room.settings, me });
-        if (room.state.phase === "revealed") sendKey(room);
+        if (room.state.keyShown) sendKey(room);
         break;
       }
 
@@ -298,10 +298,10 @@ wss.on("connection", (ws) => {
         const openedAt = m.phase === "open" ? Date.now() : byId.state.openedAt;
         const inj0 = byId.deck.injects[m.activeIdx];
         byId.state = { activeIdx: m.activeIdx, phase: m.phase, openedAt,
+          keyShown: false,
           limit: inj0 ? limitFor(byId, inj0.id) : byId.settings.timeLimit };
         toRoom(byId.id, { t: "state", ...byId.state });
         if (m.phase === "open") armReveal(byId); else clearReveal(byId.id);
-        if (m.phase === "revealed") sendKey(byId);
         markDirty(byId.id);
         markSnapshot();
         break;
@@ -343,6 +343,15 @@ wss.on("connection", (ws) => {
         p.total = Object.values(p.answers).reduce((a, b) => a + (b.points || 0), 0);
         send(ws, { t: "ack", me: p });
         markDirty(room.id);
+        markSnapshot();
+        break;
+      }
+
+      case "showkey": {
+        if (!byId || !sockets.get(ws)?.isHost) return;
+        byId.state = { ...byId.state, keyShown: true };
+        toRoom(byId.id, { t: "state", ...byId.state });
+        sendKey(byId);
         markSnapshot();
         break;
       }
