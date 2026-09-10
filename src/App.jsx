@@ -11,7 +11,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v3";
-const BUILD = "b12";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b13";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -246,7 +246,8 @@ class Boundary extends React.Component {
       <div className="crash">
         <h1>Something broke</h1>
         <p className="muted">
-          Usually a session left over from an earlier version. Clearing it fixes it.
+          Try clearing first. If it returns immediately, it's a fault in the app
+          rather than your device — send this message to whoever runs the exercise.
         </p>
         <pre>{String(this.state.err?.message || this.state.err)}</pre>
         <button className="primary" onClick={() => { nukeAll(); location.reload(); }}>
@@ -1074,6 +1075,19 @@ function Participant() {
 
   const leave = () => { nukeAll(); setMe(null); setDeck(null); setState(null); };
 
+  /* Derived above every early return. useExpired sat below them, so it only
+     ran once a device had joined — the hook count changed between renders,
+     which is React error #310. */
+  const phase = state?.phase || "lobby";
+  const inject = deck?.injects?.[state?.activeIdx ?? 0];
+  const mine = inject?.questions || [];
+  const limit = state?.limit ?? inject?.limit ?? settings?.timeLimit ?? 0;
+  const timeUp = useExpired(
+    state?.openedAt,
+    settings?.mode === "auto" ? limit : 0,
+    phase === "open" && !!me && !!deck
+  );
+
   if (!booted) return <div className="boot">Loading</div>;
 
   /* ---- join: this is the front door for everyone but the facilitator ---- */
@@ -1125,11 +1139,6 @@ function Participant() {
     );
   }
 
-  const phase = state?.phase || "lobby";
-  const inject = deck.injects?.[state?.activeIdx ?? 0];
-  const mine = inject?.questions || [];
-  const limit = state?.limit ?? inject?.limit ?? settings?.timeLimit ?? 0;
-  const timeUp = useExpired(state?.openedAt, settings?.mode === "auto" ? limit : 0, phase === "open");
 
   return (
     <>
