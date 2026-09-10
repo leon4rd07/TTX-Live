@@ -11,7 +11,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v3";
-const BUILD = "b13";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b15";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -66,6 +66,10 @@ function useSocket(onMessage) {
   const handler = useRef(onMessage);
   const queue = useRef([]);
   const [status, setStatus] = useState("connecting");
+  /* Bumped on every successful open. A reconnect gives the server a brand new
+     socket with no room attached, so whoever owns the session has to re-register
+     or they silently stop receiving phase changes. */
+  const [gen, setGen] = useState(0);
   handler.current = onMessage;
 
   useEffect(() => {
@@ -78,6 +82,7 @@ function useSocket(onMessage) {
       sock.onopen = () => {
         retry = 0; setStatus("live");
         queue.current.splice(0).forEach((m) => sock.send(JSON.stringify(m)));
+        setGen((g) => g + 1);
       };
       sock.onmessage = (e) => {
         try { handler.current?.(JSON.parse(e.data)); } catch (err) { /* junk */ }
@@ -99,7 +104,7 @@ function useSocket(onMessage) {
     else queue.current.push(msg);
   }, []);
 
-  return { send, status };
+  return { send, status, gen };
 }
 
 /* ---------------------------- parsing ---------------------------- */
@@ -304,6 +309,7 @@ function Host({ onExit }) {
   const [meta, setMeta] = useState({});
   const [revealKey, setRevealKey] = useState({});
   const [roomOpen, setRoomOpen] = useState(false);
+  const [confirmNext, setConfirmNext] = useState(false);
   const [booted, setBooted] = useState(false);
   const [keyRequired, setKeyRequired] = useState(false);
   const [keyIn, setKeyIn] = useState(() => lsGet(K_KEY) || "");
@@ -321,7 +327,12 @@ function Host({ onExit }) {
     else if (m.t === "denied") { setDenied(true); lsDel(K_KEY); }
     else if (m.t === "gone") { lsDel(K_HOST); setModel(null); setRoomId(""); setScreen("setup"); }
   }, []);
-  const { send, status } = useSocket(onMsg);
+  const { send, status, gen } = useSocket(onMsg);
+
+  /* re-attach after any reconnect */
+  useEffect(() => {
+    if (gen > 1 && roomId) send({ t: "rehost", roomId });
+  }, [gen, roomId, send]);
 
   useEffect(() => {
     const s = lsGet(K_HOST);
@@ -610,11 +621,14 @@ function Host({ onExit }) {
           }} />
         </>}
         right={<>
-          <button className={`ghost ${settings.showUnits ? "" : "off"}`}
-            title={settings.showUnits ? "Hide unit names on this screen" : "Show unit names"}
-            onClick={() => patchSettings({ showUnits: !settings.showUnits })}>
-            {settings.showUnits ? "Units shown" : "Units hidden"}
-          </button>
+          <span className="vis">
+            <button className={`ghost pill ${settings.showUnits ? "" : "off"}`}
+              title={settings.showUnits ? "Hide unit names" : "Show unit names"}
+              onClick={() => patchSettings({ showUnits: !settings.showUnits })}>Units</button>
+            <button className={`ghost pill ${settings.showNames ? "" : "off"}`}
+              title={settings.showNames ? "Hide device names" : "Show device names"}
+              onClick={() => patchSettings({ showNames: !settings.showNames })}>Names</button>
+          </span>
           <button className="ghost" onClick={() => setRoomOpen(true)}>
             Codes · {people.length}
           </button>
@@ -662,7 +676,7 @@ function Host({ onExit }) {
 
         <section className="stage">
           {phase === "lobby" ? (
-            <Lobby {...{ codes, people, model, roleColor, label, unitOf }}
+            <Lobby {...{ codes, people, model, roleColor, unitOf }} showNames={settings.showNames}
               onBegin={() => setPhase("briefing")} injectId={inject.id} />
           ) : (
             <>
@@ -763,10 +777,22 @@ function Host({ onExit }) {
 
               <div className="nav">
                 <button className="ghost" disabled={activeIdx === 0}
-                  onClick={() => { setActiveIdx((i) => i - 1); setPhase("briefing"); }}>Previous</button>
-                {activeIdx < model.injects.length - 1
-                  ? <button className="primary" onClick={() => { setActiveIdx((i) => i + 1); setPhase("briefing"); }}>Next inject</button>
-                  : <button className="primary" onClick={() => setScreen("report")}>Finish</button>}
+                  onClick={() => { setActiveIdx((i) => i - 1); setPhase("briefing"); setConfirmNext(false); }}>Previous</button>
+                {activeIdx < model.injects.length - 1 ? (
+                  confirmNext ? (
+                    <span className="confirm">
+                      <span className="cmsg">Move everyone to inject {model.injects[activeIdx + 1].id}?</span>
+                      <button className="ghost" onClick={() => setConfirmNext(false)}>Cancel</button>
+                      <button className="primary" onClick={() => {
+                        setActiveIdx((i) => i + 1); setPhase("briefing"); setConfirmNext(false);
+                      }}>Yes, move on</button>
+                    </span>
+                  ) : (
+                    <button className="primary" onClick={() => setConfirmNext(true)}>Next inject</button>
+                  )
+                ) : (
+                  <button className="primary" onClick={() => setScreen("report")}>Finish</button>
+                )}
               </div>
             </>
           )}
@@ -796,7 +822,7 @@ function Countdown({ openedAt, limit, big }) {
   );
 }
 
-function Lobby({ codes, people, model, roleColor, label, unitOf, onBegin, injectId }) {
+function Lobby({ codes, people, model, roleColor, unitOf, showNames, onBegin, injectId }) {
   const joined = people.length;
   return (
     <div className="lobby">
@@ -818,7 +844,13 @@ function Lobby({ codes, people, model, roleColor, label, unitOf, onBegin, inject
             <li key={r} className={members.length ? "in" : ""} style={{ "--c": roleColor(r) }}>
               <span className="cgunit">{unitOf(r)}</span>
               <b className="cgcode">{code}</b>
-              <span className="cgwho">{members.length ? members.map(label).join(", ") : "not joined yet"}</span>
+              <span className="cgwho">
+                {members.length === 0
+                  ? "not joined yet"
+                  : showNames
+                    ? members.map((m) => m.name).join(", ")
+                    : `${members.length} device${members.length > 1 ? "s" : ""} joined`}
+              </span>
             </li>
           );
         })}
@@ -863,7 +895,11 @@ function RoomPanel({ codes, people, model, roleColor, label, unitOf, settings, o
                 <span className="cname">{unitOf(r)}</span>
                 <b className="bigcode">{code}</b>
                 <span className={members.length ? "tin" : "tmiss"}>
-                  {members.length ? members.map(label).join(", ") : "waiting"}
+                  {members.length === 0
+                    ? "waiting"
+                    : settings.showNames
+                      ? members.map((m) => m.name).join(", ")
+                      : `${members.length} joined`}
                 </span>
               </li>
             );
@@ -912,6 +948,7 @@ function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggl
             {dist.map((c) => (
               <li key={c.i} className={c.correct ? "right" : ""}>
                 <span className="dlabel">{c.text}</span>
+                {c.correct && <span className="keytag">correct</span>}
                 <span className="dbar"><i style={{ width: `${(c.n / total) * 100}%` }} /></span>
                 <span className="dn">{c.n}</span>
               </li>
@@ -1043,6 +1080,7 @@ function Participant() {
   const [settings, setSettings] = useState(null);
   const [drafts, setDrafts] = useState({});
   const [msg, setMsg] = useState("");
+  const [key, setKey] = useState({});
   const [booted, setBooted] = useState(false);
 
   const onMsg = useCallback((m) => {
@@ -1060,9 +1098,15 @@ function Participant() {
     else if (m.t === "locked") setMsg("Answers are closed.");
     else if (m.t === "timeup") setMsg("Time is up for this question.");
     else if (m.t === "nosuch") { setFoundPeran(""); setMsg("No exercise found with that code."); }
+    else if (m.t === "key") setKey(m.key || {});
+    else if (m.t === "left") { lsDel(K_ME); setMe(null); setDeck(null); setState(null); }
     else if (m.t === "gone" || m.t === "ended") { lsDel(K_ME); setMe(null); setDeck(null); setState(null); }
   }, []);
-  const { send, status } = useSocket(onMsg);
+  const { send, status, gen } = useSocket(onMsg);
+
+  useEffect(() => {
+    if (gen > 1 && me?.roomId && me?.pid) send({ t: "rejoin", roomId: me.roomId, pid: me.pid });
+  }, [gen, me?.roomId, me?.pid, send]);
 
   useEffect(() => {
     const saved = lsGet(K_ME);
@@ -1073,7 +1117,11 @@ function Participant() {
     setBooted(true);
   }, [send]);
 
-  const leave = () => { nukeAll(); setMe(null); setDeck(null); setState(null); };
+  const leave = () => {
+    if (me?.roomId && me?.pid) send({ t: "leave", roomId: me.roomId, pid: me.pid });
+    nukeAll(); setMe(null); setDeck(null); setState(null);
+    setCodeIn(""); setNameIn(""); setFoundPeran(""); setKey({});
+  };
 
   /* Derived above every early return. useExpired sat below them, so it only
      ran once a device had joined — the hook count changed between renders,
@@ -1188,14 +1236,18 @@ function Participant() {
                           <div className="opts">
                             {q.choices.map((c, i) => (
                               <button key={i}
-                                className={`opt ${sent ? (sent.choice === i ? "picked" : "dim") : ""} ${timeUp && !sent ? "dim" : ""}`}
-                                disabled={!!sent || timeUp}
+                                className={`opt ${sent && sent.choice === i ? "picked" : ""} ${timeUp ? "dim" : ""}`}
+                                disabled={timeUp}
                                 onClick={() => send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: i } })}>
                                 <span className="oletter">{String.fromCharCode(65 + i)}</span>
                                 <span className="otext">{c.text}</span>
                               </button>
                             ))}
-                            {sent && <p className="sent">Locked in. Waiting for the room.</p>}
+                            {sent && (
+                              <p className="sent">
+                                {timeUp ? "Locked in." : "Answer sent. Tap another option to change it."}
+                              </p>
+                            )}
                           </div>
                         ) : (
                           <>
@@ -1225,6 +1277,7 @@ function Participant() {
                         if (!a) return (
                           <div className="rescard miss" key={q.qid}>
                             <p className="qtext">{q.text}</p>
+                            {key[q.qid] && <p className="rkey">Correct answer: <b>{key[q.qid].text}</b></p>}
                             <p className="rline">No answer sent</p>
                           </div>
                         );
@@ -1232,6 +1285,9 @@ function Participant() {
                           <div className={`rescard ${a.correct ? "ok" : a.correct === false ? "no" : ""}`} key={q.qid}>
                             <p className="qtext">{q.text}</p>
                             <p className="rpick">You chose: {a.text}</p>
+                            {key[q.qid] && !a.correct && (
+                              <p className="rkey">Correct answer: <b>{key[q.qid].text}</b></p>
+                            )}
                             <p className="rline">
                               {a.correct == null ? "Not auto-scored" : a.correct ? "Correct" : "Incorrect"}
                               {" · "}{(a.ms / 1000).toFixed(1)}s
@@ -1352,14 +1408,16 @@ function Report({ model, scores, notes, meta, people, settings, roleColor, fileN
 
           <h3>By Peran</h3>
           <table className="tbl">
-            <thead><tr><th>Peran</th><th>Correct</th><th>Points</th><th>Quality</th></tr></thead>
+            <thead><tr><th>Peran</th><th>Correct</th><th>Points</th>
+              {settings.mode === "manual" && <th>Quality</th>}</tr></thead>
             <tbody>
               {Object.entries(byRole).map(([role, d]) => (
                 <tr key={role}>
                   <td><span className="dot" style={{ background: roleColor(role) }} />{role}</td>
                   <td>{d.mc ? `${d.correct}/${d.mc}` : "—"}</td>
                   <td>{d.pts ? d.pts.toLocaleString() : "—"}</td>
-                  <td>{d.scored ? (d.sum / d.scored).toFixed(1) : "—"}</td>
+                  {settings.mode === "manual" &&
+                    <td>{d.scored ? (d.sum / d.scored).toFixed(1) : "—"}</td>}
                 </tr>
               ))}
             </tbody>
@@ -1458,7 +1516,16 @@ const CSS = `
 .ttx .ghost:hover:not(:disabled){border-color:var(--muted)}
 .ttx .ghost:disabled{opacity:.35;cursor:default}
 .ttx .ghost.wide{width:100%;padding:11px;margin-top:20px;text-align:center}
-.ttx .bar.dark .ghost.off{color:#7E8F8D;border-style:dashed}
+.vis{display:flex;gap:3px}
+.keytag{font-size:10px;font-weight:600;color:var(--good);border:1px solid #A9C7B4;
+  border-radius:9px;padding:1px 7px;background:#EFF6F1}
+.confirm{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.cmsg{font-size:13px;color:var(--ink2)}
+.rkey{margin:0 0 7px;font-size:13.5px;color:var(--good)}
+.rkey b{font-weight:600}
+.ttx .ghost.pill{padding:5px 11px;font-size:12px}
+.ttx .bar.dark .ghost.pill{background:#1E3D44;border-color:#2F5A60;color:#CFDCDA}
+.ttx .bar.dark .ghost.pill.off{background:transparent;border-style:dashed;border-color:#33474F;color:#728683}
 .panel .chk{margin-bottom:14px}
 .panel h3{margin-top:26px}
 .ttx .danger{padding:8px 16px;border:1px solid #D9B1A5;color:var(--alert);border-radius:5px;font-size:13px}
