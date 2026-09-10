@@ -11,9 +11,14 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v3";
-const BUILD = "b11";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b12";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
+const K_KEY = `ttx:${V}:key`;
+
+/* The facilitator lives at /host. Participants never see a link to it. */
+const isHostRoute = () =>
+  /^\/host\/?$/i.test(location.pathname) || /^#\/?host$/i.test(location.hash);
 
 const ROLE_COLORS = ["#2E5EAA", "#B5442E", "#5A7A2E", "#7A4B8F", "#B07A16", "#2A7A72", "#8F3A5C", "#43506B"];
 const SCORE_LABELS = ["Not addressed", "Partial", "Adequate", "Strong"];
@@ -255,14 +260,19 @@ class Boundary extends React.Component {
 /* ================================================================== */
 
 export default function App() {
-  const [mode, setMode] = useState("join");
+  const [host, setHost] = useState(isHostRoute());
+  useEffect(() => {
+    const onPop = () => setHost(isHostRoute());
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+  const leaveHost = () => { history.pushState({}, "", "/"); setHost(false); };
+
   return (
     <div className="ttx">
       <style>{CSS}</style>
       <Boundary>
-        {mode === "host"
-          ? <Host onExit={() => setMode("join")} />
-          : <Participant onHost={() => setMode("host")} />}
+        {host ? <Host onExit={leaveHost} /> : <Participant />}
       </Boundary>
     </div>
   );
@@ -294,6 +304,9 @@ function Host({ onExit }) {
   const [revealKey, setRevealKey] = useState({});
   const [roomOpen, setRoomOpen] = useState(false);
   const [booted, setBooted] = useState(false);
+  const [keyRequired, setKeyRequired] = useState(false);
+  const [keyIn, setKeyIn] = useState(() => lsGet(K_KEY) || "");
+  const [denied, setDenied] = useState(false);
   const fileRef = useRef(null);
 
   const onMsg = useCallback((m) => {
@@ -303,6 +316,8 @@ function Host({ onExit }) {
       setOpenedAt(m.state.openedAt); setScreen("run");
     } else if (m.t === "roster") setPeople(m.people || []);
     else if (m.t === "settings") { setSettings(m.settings); if (m.times) setTimes(m.times); }
+    else if (m.t === "hello") setKeyRequired(!!m.keyRequired);
+    else if (m.t === "denied") { setDenied(true); lsDel(K_KEY); }
     else if (m.t === "gone") { lsDel(K_HOST); setModel(null); setRoomId(""); setScreen("setup"); }
   }, []);
   const { send, status } = useSocket(onMsg);
@@ -360,7 +375,11 @@ function Host({ onExit }) {
     }
   }
 
-  const start = () => send({ t: "host", deck: model, settings, codes: draftCodes, times });
+  const start = () => {
+    setDenied(false);
+    if (keyIn) lsSet(K_KEY, keyIn);
+    send({ t: "host", deck: model, settings, codes: draftCodes, times, key: keyIn });
+  };
 
   const setInjectTime = (id, v) => {
     const next = { ...times, [id]: v };
@@ -534,7 +553,19 @@ function Host({ onExit }) {
               ))}
             </ul>
 
-            <button className="primary big" onClick={start}>Open the room</button>
+            {keyRequired && (
+              <>
+                <h3>Facilitator passcode</h3>
+                <label className="fld">
+                  <span>Set by whoever deployed this</span>
+                  <input type="password" value={keyIn} autoComplete="off"
+                    onChange={(e) => { setKeyIn(e.target.value); setDenied(false); }} />
+                </label>
+              </>
+            )}
+            {denied && <div className="err">That passcode was not accepted.</div>}
+            <button className="primary big" onClick={start}
+              disabled={keyRequired && !keyIn}>Open the room</button>
           </div>
         </main>
       </>
@@ -1001,7 +1032,7 @@ const Check = ({ label, checked, onChange, hint }) => (
 
 /* =========================== PARTICIPANT =========================== */
 
-function Participant({ onHost }) {
+function Participant() {
   const [me, setMe] = useState(null);
   const [codeIn, setCodeIn] = useState("");
   const [nameIn, setNameIn] = useState("");
@@ -1082,14 +1113,13 @@ function Participant({ onHost }) {
             Join
           </button>
 
-          <div className="doorfoot">
-            <button className="link" onClick={onHost}>Running this exercise? Set it up</button>
-            {(lsGet(K_ME) || lsGet(K_HOST)) && (
+          {(lsGet(K_ME) || lsGet(K_HOST)) && (
+            <div className="doorfoot">
               <button className="link quiet" onClick={() => { nukeAll(); location.reload(); }}>
                 Clear saved session
               </button>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </main>
     );
