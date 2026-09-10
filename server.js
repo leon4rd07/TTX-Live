@@ -23,6 +23,10 @@ const SNAPSHOT = process.env.SNAPSHOT_PATH || join(__dirname, "rooms.json");
 const ROOM_TTL_MS = 12 * 60 * 60 * 1000;
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no I, O, 0, 1
 
+/* Optional facilitator passcode. Unset means anyone reaching /host can run an
+   exercise — fine for a dry run, not for one with real content. */
+const HOST_KEY = (process.env.HOST_KEY || "").trim();
+
 const app = express();
 const server = createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
@@ -175,6 +179,7 @@ function scoreAnswer(room, q, choiceIdx, elapsedMs, limit) {
 
 wss.on("connection", (ws) => {
   sockets.set(ws, {});
+  send(ws, { t: "hello", keyRequired: !!HOST_KEY });
   ws.isAlive = true;
   ws.on("pong", () => { ws.isAlive = true; });
 
@@ -188,6 +193,7 @@ wss.on("connection", (ws) => {
     switch (m.t) {
       /* ---- facilitator opens an exercise ---- */
       case "host": {
+        if (HOST_KEY && String(m.key || "") !== HOST_KEY) return send(ws, { t: "denied" });
         const id = newCode() + newCode();
         const settings = { ...DEFAULTS, ...(m.settings || {}) };
         const codes = {};
