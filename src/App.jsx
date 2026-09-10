@@ -11,6 +11,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v3";
+const BUILD = "b7";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 
@@ -264,6 +265,7 @@ function Landing({ onPick }) {
           Every business unit joins with its own code. They answer on one device
           per unit, scored on whether they got it right and how fast.
         </p>
+        <p className="build big">build {BUILD}</p>
         <div className="picks">
           <button className="pick" onClick={() => onPick("host")}>
             <b>Run an exercise</b><span>Load your inject sheet and facilitate</span>
@@ -1300,6 +1302,7 @@ function Bar({ left, right, onExit, exitLabel = "Exit", conn }) {
     <header className="bar">
       <div className="brand"><span className="mark" aria-hidden="true" />{left}</div>
       <div className="barright">
+        <span className="build" title="Build tag">{BUILD}</span>
         {conn && conn !== "live" && <span className="offline">Reconnecting</span>}
         {right}
         <button className="ghost" onClick={onExit}>{exitLabel}</button>
@@ -1561,6 +1564,8 @@ const CSS = `
 .rline{margin:0;font-size:13px;color:var(--muted)}
 .rescard.ok .rline b{color:var(--good)}
 .rescard.no .rline b{color:var(--bad)}
+.build{font-family:var(--mono);font-size:11px;color:var(--muted);opacity:.7}
+.build.big{margin:-14px 0 18px}
 .phasetag{padding:2px 9px;border-radius:10px;background:var(--rule2);color:var(--ink2);font-size:11.5px;font-weight:500}
 .scrim{position:fixed;inset:0;background:rgba(22,28,32,.34);z-index:20;display:flex;justify-content:flex-end}
 .panel{background:var(--paper);width:min(440px,100%);height:100%;overflow-y:auto;padding:22px 24px 40px;
