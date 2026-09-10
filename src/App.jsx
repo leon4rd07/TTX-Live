@@ -100,23 +100,32 @@ const HEADER_ALIASES = {
   decisionwindow: "window", bataswaktu: "window", windowminutes: "window",
 };
 const normKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+/* Split only on unambiguous list separators. "&", "/", "dan" and "and" all
+   appear inside real unit names — "Hukum & Kepatuhan" is one unit, not two. */
 const splitPeran = (v) => [...new Set(
-  String(v || "").split(/[,;/&+|]|\r?\n|\s+dan\s+|\s+and\s+/i).map((s) => s.trim()).filter(Boolean)
+  String(v || "").split(/[,;|]|\r?\n/).map((s) => s.trim()).filter(Boolean)
 )];
 
 function detectAnswerType(raw) {
   const t = String(raw || "").trim();
   if (!t) return "open";
   const lines = t.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-  if (lines.filter((s) => /^(?:[A-Ea-e][.)]|[1-6][.)])\s+\S/.test(s)).length >= 2) return "choice";
+  const bare = lines.map((l) => l.replace(/^\s*\*+\s*/, ""));
+  if (bare.filter((s) => /^(?:[A-Ea-e][.)]|[1-6][.)])\s+\S/.test(s)).length >= 2) return "choice";
   const parts = t.split(/[;,]/).map((s) => s.trim()).filter(Boolean);
   if (parts.length >= 2 && parts.every((p) => p.split(/\s+/).length <= 5)) return "keywords";
   return "open";
 }
 const parseChoices = (raw) => String(raw || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
   .map((s) => ({
-    text: s.replace(/^\s*(?:[A-Ea-e][.)]|[1-6][.)])\s*/, "").replace(/^\*+|\*+$|\(correct\)|\[x\]/gi, "").trim(),
-    correct: /^\*|\*$|\(correct\)|\[x\]/i.test(s),
+    /* strip the correct-marker first, then the A./1) prefix — the other
+       order leaves the letter in the text and the UI renders it twice */
+    text: s
+      .replace(/^\s*\*+\s*/, "").replace(/\s*\*+\s*$/, "")
+      .replace(/\(correct\)|\[x\]/gi, "")
+      .replace(/^\s*(?:[A-Ea-e][.)]|[1-6][.)])\s*/, "")
+      .trim(),
+    correct: /^\s*\*|\*\s*$|\(correct\)|\[x\]/i.test(s),
   }));
 const parseKeywords = (raw) => String(raw || "").split(/[;,]|\r?\n/).map((s) => s.trim()).filter(Boolean);
 
@@ -297,6 +306,7 @@ function Host({ onExit }) {
   const [notes, setNotes] = useState({});
   const [meta, setMeta] = useState({});
   const [revealKey, setRevealKey] = useState({});
+  const [roomOpen, setRoomOpen] = useState(false);
   const [booted, setBooted] = useState(false);
   const fileRef = useRef(null);
 
@@ -569,9 +579,22 @@ function Host({ onExit }) {
 
   return (
     <>
-      <Bar left={<>Live · <b className="code">{people.length}</b> device{people.length === 1 ? "" : "s"}</>}
+      <Bar left={<>{inject.siklus} · <b>Inject {inject.id}</b> · <span className="phasetag">{
+        phase === "lobby" ? "Waiting room" : phase === "briefing" ? "Briefing"
+          : phase === "open" ? "Answering" : "Discussing"}</span></>}
         onExit={onExit} conn={status}
-        right={<button className="ghost" onClick={() => setScreen("report")}>Report</button>} />
+        right={<>
+          <button className="ghost" onClick={() => setRoomOpen(true)}>
+            Codes &amp; devices · {people.length}
+          </button>
+          <button className="ghost" onClick={() => setScreen("report")}>Report</button>
+        </>} />
+
+      {roomOpen && (
+        <RoomPanel {...{ codes, people, model, roleColor, label, unitOf }}
+          onClose={() => setRoomOpen(false)}
+          onLobby={() => { setPhase("lobby"); setRoomOpen(false); }} />
+      )}
 
       <main className="run">
         <aside className="rail">
@@ -599,7 +622,7 @@ function Host({ onExit }) {
         <section className="stage">
           {phase === "lobby" ? (
             <Lobby {...{ codes, people, model, roleColor, settings, label, unitOf }}
-              onBegin={() => setPhase("briefing")} />
+              onBegin={() => setPhase("briefing")} injectId={inject.id} />
           ) : (
             <>
               <div className="stagehead">
@@ -622,9 +645,12 @@ function Host({ onExit }) {
               </div>
 
               <div className="phasebar">
+                <button className="ghost" onClick={() => setPhase("lobby")} title="Show the join codes">
+                  Waiting room
+                </button>
                 {phase === "briefing" && (
                   <>
-                    <span className="pmsg">Everyone can see the scenario. Read it aloud.</span>
+                    <span className="pmsg">Scenario is on every device. Read it aloud.</span>
                     {settings.mode === "auto" && (
                       <span className="inlinetime">
                         <input type="number" min="0" step="5" placeholder={String(settings.timeLimit)}
@@ -640,13 +666,13 @@ function Host({ onExit }) {
                 )}
                 {phase === "open" && (
                   <>
-                    <span className="pmsg">{allIn ? "Everyone has answered." : `Waiting on answers.`}</span>
+                    <span className="pmsg">{allIn ? "Everyone has answered." : "Waiting on answers."}</span>
                     <button className="primary" onClick={() => setPhase("revealed")}>Reveal answers</button>
                   </>
                 )}
                 {phase === "revealed" && (
                   <>
-                    <span className="pmsg">Discuss, then score anything unscored.</span>
+                    <span className="pmsg">Answers are revealed. Discuss, then score.</span>
                     <button className="ghost" onClick={() => { setOpenedAt(Date.now()); setPhase("open"); }}>
                       Reopen
                     </button>
@@ -728,11 +754,11 @@ function Countdown({ openedAt, limit }) {
   return <div className={`clock ${left <= 10 ? "urgent" : ""}`}>{fmt(left)}</div>;
 }
 
-function Lobby({ codes, people, model, roleColor, settings, label, unitOf, onBegin }) {
+function Lobby({ codes, people, model, roleColor, settings, label, unitOf, onBegin, injectId }) {
   const byRole = (r) => people.filter((p) => p.peran === r);
   return (
     <div className="lobby">
-      <h2>Join codes</h2>
+      <h2>Waiting room</h2>
       <p className="lede">
         Give each unit its own code. The code decides which questions they get.
       </p>
@@ -754,10 +780,57 @@ function Lobby({ codes, people, model, roleColor, settings, label, unitOf, onBeg
           );
         })}
       </ul>
-      <button className="primary big" onClick={onBegin} disabled={people.length === 0}>
-        Begin the exercise
+      <button className="primary big" onClick={onBegin}>
+        {injectId ? `Continue to inject ${injectId}` : "Begin the exercise"}
       </button>
-      {people.length === 0 && <p className="hint">Waiting for at least one device to join.</p>}
+      {people.length === 0 && (
+        <p className="hint">
+          No devices yet. You can still continue — anyone joining later picks up
+          from wherever you are.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function RoomPanel({ codes, people, model, roleColor, label, unitOf, onClose, onLobby }) {
+  useEffect(() => {
+    const esc = (e) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [onClose]);
+
+  return (
+    <div className="scrim" onClick={onClose}>
+      <aside className="panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Codes and devices">
+        <div className="phead">
+          <h2>Codes &amp; devices</h2>
+          <button className="ghost" onClick={onClose}>Close</button>
+        </div>
+        <p className="hint">
+          Late arrivals can join at any point. They pick up from the current inject.
+        </p>
+        <ul className="codelist big">
+          {model.roles.map((r) => {
+            const code = Object.keys(codes).find((c) => codes[c] === r);
+            const members = people.filter((p) => p.peran === r);
+            return (
+              <li key={r}>
+                <span className="dot" style={{ background: roleColor(r) }} />
+                <span className="cname">{unitOf(r)}</span>
+                <b className="bigcode">{code}</b>
+                <span className={members.length ? "tin" : "tmiss"}>
+                  {members.length ? members.map(label).join(", ") : "waiting"}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+        <button className="ghost wide" onClick={onLobby}>Back to the waiting room</button>
+        <p className="hint">
+          Sends every device back to standby. Your scores and notes are kept.
+        </p>
+      </aside>
     </div>
   );
 }
@@ -1247,7 +1320,7 @@ const CSS = `
   font-family:var(--sans);color:var(--ink);background:var(--paper);min-height:100vh;
   font-size:15px;line-height:1.5}
 .ttx *{box-sizing:border-box}
-.ttx button{font:inherit;cursor:pointer;border:none;background:none;color:inherit}
+.ttx button{font:inherit;cursor:pointer;border:none;background:none;color:inherit;text-align:inherit}
 .ttx :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:3px}
 .ttx textarea,.ttx input[type=text],.ttx input[type=number],.ttx input:not([type]){font:inherit;color:inherit;
   width:100%;background:var(--panel);border:1px solid var(--rule);border-radius:4px;padding:9px 11px}
@@ -1272,15 +1345,15 @@ const CSS = `
 .barright{margin-left:auto;display:flex;align-items:center;gap:10px;font-size:12px;color:var(--muted)}
 .offline{color:var(--bad);font-weight:500}
 .code{font-family:var(--mono);color:var(--ink)}
-.ghost{padding:5px 12px;border:1px solid var(--rule);border-radius:4px;font-size:13px;color:var(--ink2);width:auto}
-.ghost:hover:not(:disabled){border-color:var(--muted)}
-.ghost:disabled{opacity:.4;cursor:default}
-.primary{padding:8px 18px;background:var(--accent);color:#fff;border-radius:4px;font-size:14px;font-weight:500;width:auto}
-.primary:hover:not(:disabled){background:#0C4A4D}
-.primary:disabled{opacity:.4;cursor:default}
-.primary.big{width:100%;padding:13px;margin-top:20px;font-size:15px}
-.danger{padding:8px 16px;border:1px solid #D8AFA3;color:var(--bad);border-radius:4px;font-size:13px}
-.link{color:var(--accent);text-decoration:underline;text-underline-offset:3px;font-size:14px}
+.ttx .ghost{padding:5px 12px;border:1px solid var(--rule);border-radius:4px;font-size:13px;color:var(--ink2);width:auto}
+.ttx .ghost:hover:not(:disabled){border-color:var(--muted)}
+.ttx .ghost:disabled{opacity:.4;cursor:default}
+.ttx .primary{padding:8px 18px;background:var(--accent);color:#fff;border-radius:4px;font-size:14px;font-weight:500;width:auto}
+.ttx .primary:hover:not(:disabled){background:#0C4A4D}
+.ttx .primary:disabled{opacity:.4;cursor:default}
+.ttx .primary.big{width:100%;padding:13px;margin-top:20px;font-size:15px}
+.ttx .danger{padding:8px 16px;border:1px solid #D8AFA3;color:var(--bad);border-radius:4px;font-size:13px}
+.ttx .link{color:var(--accent);text-decoration:underline;text-underline-offset:3px;font-size:14px}
 
 .landing{display:flex;justify-content:center;padding:70px 24px}
 .landinner{max-width:470px;width:100%}
@@ -1288,11 +1361,11 @@ const CSS = `
 .lede{color:var(--ink2);margin:0 0 22px;max-width:58ch}
 .lede b{font-weight:600;font-family:var(--mono);font-size:13px}
 .picks{display:grid;gap:10px}
-.pick{text-align:left;background:var(--panel);border:1px solid var(--rule);border-radius:6px;padding:16px 18px}
-.pick:hover{border-color:var(--accent)}
+.ttx .pick{text-align:left;background:var(--panel);border:1px solid var(--rule);border-radius:6px;padding:16px 18px}
+.ttx .pick:hover{border-color:var(--accent)}
 .pick b{display:block;font-size:15.5px;font-weight:600;margin-bottom:3px}
 .pick span{font-size:13.5px;color:var(--muted)}
-.landinner .link{margin-top:22px;display:inline-block}
+.ttx .landinner .link{margin-top:22px;display:inline-block}
 
 .load{display:flex;justify-content:center;padding:48px 24px 80px}
 .loadinner{max-width:560px;width:100%}
@@ -1305,7 +1378,7 @@ const CSS = `
   border-radius:0 4px 4px 0;font-size:13.5px;color:#7A2C1D}
 .found{margin:-6px 0 16px;padding:9px 12px;background:#F1F8F3;border-left:3px solid var(--good);
   border-radius:0 4px 4px 0;font-size:14px;color:var(--good)}
-.load .link{margin-top:18px;display:inline-block}
+.ttx .load .link{margin-top:18px;display:inline-block}
 .fld{display:block;margin-bottom:16px}
 .fld>span{display:block;font-size:13px;font-weight:500;color:var(--ink2);margin-bottom:5px}
 .codein{font-family:var(--mono);font-size:24px;letter-spacing:.24em;text-align:center;text-transform:uppercase}
@@ -1343,9 +1416,9 @@ const CSS = `
 .sikhead{font-size:11px;font-weight:600;color:var(--muted);padding:16px 14px 6px;
   border-top:1px solid var(--rule2);margin-top:8px}
 .cues li:first-child.sikhead{border-top:none;margin-top:0;padding-top:4px}
-.cue{width:100%;display:flex;align-items:center;gap:8px;padding:7px 14px;text-align:left;border-left:2px solid transparent}
-.cue:hover{background:var(--rule2)}
-.cue.current{background:var(--panel);border-left-color:var(--accent);font-weight:500}
+.ttx .cue{width:100%;display:flex;align-items:center;gap:8px;padding:7px 14px;text-align:left;border-left:2px solid transparent}
+.ttx .cue:hover{background:var(--rule2)}
+.ttx .ttx .cue.current{background:var(--panel);border-left-color:var(--accent);font-weight:500}
 .cueno{font-family:var(--mono);font-size:13px;min-width:24px}
 .cuedots{display:flex;gap:3px}
 .cuedots i{width:6px;height:6px;border-radius:50%;display:block}
@@ -1413,7 +1486,7 @@ const CSS = `
 .dseg{display:flex;gap:3px}
 .dseg button{padding:5px 10px;border:1px solid var(--rule);border-radius:4px;font-size:12.5px;color:var(--muted);white-space:nowrap}
 .dseg button.on{background:var(--c);border-color:var(--c);color:#fff;font-weight:500}
-.reveal{font-size:13px;color:var(--accent);text-decoration:underline;text-underline-offset:3px}
+.ttx .reveal{font-size:13px;color:var(--accent);text-decoration:underline;text-underline-offset:3px}
 .model{margin:12px 0 0;padding-top:12px;border-top:1px dashed var(--rule);white-space:pre-line;
   font-family:var(--serif);font-size:14.5px;line-height:1.6;color:var(--ink2)}
 
@@ -1423,8 +1496,8 @@ const CSS = `
 .decbar input{width:56px;font-family:var(--mono);text-align:center;padding:4px 6px;background:var(--paper)}
 .decbar .unit{color:var(--muted)}
 .verdict{margin-left:auto;font-family:var(--mono);font-size:12.5px}
-.undo{margin-left:auto;font-size:12.5px;color:var(--accent);text-decoration:underline;text-underline-offset:3px}
-.decbar .verdict+.undo{margin-left:0}
+.ttx .undo{margin-left:auto;font-size:12.5px;color:var(--accent);text-decoration:underline;text-underline-offset:3px}
+.ttx .decbar .verdict+.undo{margin-left:0}
 .decbar.ontime{border-color:#9CC0AE;background:#F1F8F3}
 .decbar.ontime .verdict{color:var(--good)}
 .decbar.late{border-color:#E0A99B;background:#FCF2EF}
@@ -1441,14 +1514,14 @@ const CSS = `
 @keyframes beat{0%,100%{opacity:.25}50%{opacity:1}}
 .bigpts{font-family:var(--mono);font-size:32px;font-weight:500;color:var(--accent);margin:14px 0 0}
 .opts{display:grid;gap:8px}
-.opt{display:flex;align-items:center;gap:11px;text-align:left;padding:14px 15px;background:var(--paper);
+.ttx .opt{display:flex;align-items:center;gap:11px;text-align:left;padding:14px 15px;background:var(--paper);
   border:1.5px solid var(--rule);border-radius:6px;font-size:15px;line-height:1.4}
-.opt:hover:not(:disabled){border-color:var(--accent)}
-.opt:disabled{opacity:.5;cursor:default}
-.opt.picked{border-color:var(--accent);background:#E8F1F0;opacity:1;font-weight:500}
+.ttx .opt:hover:not(:disabled){border-color:var(--accent)}
+.ttx .opt:disabled{opacity:.5;cursor:default}
+.ttx .opt.picked{border-color:var(--accent);background:#E8F1F0;opacity:1;font-weight:500}
 .oletter{font-family:var(--mono);font-size:12px;font-weight:500;width:22px;height:22px;flex:none;
   display:grid;place-items:center;border-radius:4px;background:var(--panel);border:1px solid var(--rule)}
-.opt.picked .oletter{background:var(--accent);border-color:var(--accent);color:#fff}
+.ttx .ttx .opt.picked .oletter{background:var(--accent);border-color:var(--accent);color:#fff}
 .sent{margin:9px 0 0;font-size:12.5px;color:var(--accent)}
 .sentnote{text-align:center;font-size:13px;color:var(--accent);margin-top:10px}
 
@@ -1488,6 +1561,17 @@ const CSS = `
 .rline{margin:0;font-size:13px;color:var(--muted)}
 .rescard.ok .rline b{color:var(--good)}
 .rescard.no .rline b{color:var(--bad)}
+.phasetag{padding:2px 9px;border-radius:10px;background:var(--rule2);color:var(--ink2);font-size:11.5px;font-weight:500}
+.scrim{position:fixed;inset:0;background:rgba(22,28,32,.34);z-index:20;display:flex;justify-content:flex-end}
+.panel{background:var(--paper);width:min(440px,100%);height:100%;overflow-y:auto;padding:22px 24px 40px;
+  border-left:1px solid var(--rule);box-shadow:-8px 0 28px rgba(0,0,0,.10)}
+.phead{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.phead h2{margin:0}
+.ttx .ghost.wide{width:100%;padding:10px;margin-top:20px;text-align:center}
+@media (prefers-reduced-motion:no-preference){
+  .panel{animation:slide .18s ease-out}
+  @keyframes slide{from{transform:translateX(16px);opacity:.6}to{transform:none;opacity:1}}
+}
 
 @media (max-width:820px){
   .run{grid-template-columns:1fr}
@@ -1500,7 +1584,7 @@ const CSS = `
   .setgrid{grid-template-columns:1fr}
   .codelist.big li{flex-wrap:wrap}
   .phasebar{flex-wrap:wrap}
-  .phasebar .primary{width:100%}
+  .ttx .phasebar .primary{width:100%}
 }
 @media (prefers-reduced-motion:reduce){.ttx *{animation:none!important;transition:none!important}}
 `;
