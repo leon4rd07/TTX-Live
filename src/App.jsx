@@ -11,7 +11,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v3";
-const BUILD = "b15";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b16";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -310,6 +310,7 @@ function Host({ onExit }) {
   const [revealKey, setRevealKey] = useState({});
   const [roomOpen, setRoomOpen] = useState(false);
   const [confirmNext, setConfirmNext] = useState(false);
+  const echo = useRef("");
   const [booted, setBooted] = useState(false);
   const [keyRequired, setKeyRequired] = useState(false);
   const [keyIn, setKeyIn] = useState(() => lsGet(K_KEY) || "");
@@ -321,6 +322,12 @@ function Host({ onExit }) {
       setRoomId(m.roomId); setCodes(m.codes); setSettings(m.settings); setTimes(m.times || {});
       setActiveIdx(m.state.activeIdx); setPhase(m.state.phase);
       setOpenedAt(m.state.openedAt); setScreen("run");
+    } else if (m.t === "state") {
+      /* remember what arrived so the push effect below doesn't echo it back */
+      echo.current = `${m.activeIdx}:${m.phase}`;
+      setActiveIdx(m.activeIdx);
+      setPhase(m.phase);
+      if (m.openedAt) setOpenedAt(m.openedAt);
     } else if (m.t === "roster") setPeople(m.people || []);
     else if (m.t === "settings") { setSettings(m.settings); if (m.times) setTimes(m.times); }
     else if (m.t === "hello") setKeyRequired(!!m.keyRequired);
@@ -356,7 +363,10 @@ function Host({ onExit }) {
   }, [booted, model, roomId, fileName, scores, notes, meta, codes, settings, times]);
 
   useEffect(() => {
-    if (roomId && screen === "run") send({ t: "state", roomId, activeIdx, phase });
+    if (!roomId || screen !== "run") return;
+    const sig = `${activeIdx}:${phase}`;
+    if (echo.current === sig) return; // this change came from the server
+    send({ t: "state", roomId, activeIdx, phase });
   }, [roomId, screen, activeIdx, phase, send]);
 
   const roleColor = useCallback((p) => {
@@ -606,7 +616,8 @@ function Host({ onExit }) {
 
   const answeredBy = (q) => people.filter((p) => p.peran === q.peran && p.answers?.[q.qid]);
   const expected = inject.roles.reduce((a, r) => a + people.filter((p) => p.peran === r).length, 0);
-  const allIn = inject.questions.every((q) =>
+  const joinedHere = people.filter((p) => inject.roles.includes(p.peran));
+  const allIn = joinedHere.length > 0 && inject.questions.every((q) =>
     people.filter((p) => p.peran === q.peran).every((p) => p.answers?.[q.qid]));
 
   return (
@@ -616,6 +627,7 @@ function Host({ onExit }) {
           <span className="crumb">{inject.siklus}</span>
           <b className="injno">Inject {inject.id}</b>
           <PhaseSteps phase={phase} onPick={(k) => {
+            echo.current = "";
             if (k === "open" && phase !== "open") setOpenedAt(Date.now());
             setPhase(k);
           }} />
@@ -700,7 +712,9 @@ function Host({ onExit }) {
                       <span className="unit">sec</span>
                     </span>
                   )}
-                  <button className="primary" onClick={() => { setOpenedAt(Date.now()); setPhase("open"); }}>
+                  <button className="primary" onClick={() => {
+                    echo.current = ""; setOpenedAt(Date.now()); setPhase("open");
+                  }}>
                     Open for answers
                   </button>
                 </>)}
@@ -709,13 +723,19 @@ function Host({ onExit }) {
                   {settings.mode === "auto" && limitOf(inject.id) > 0
                     ? <Countdown openedAt={openedAt} limit={limitOf(inject.id)} />
                     : <span className="amsg">Answers are open.</span>}
-                  <span className="amsg right">{allIn ? "All units in" : "Waiting on answers"}</span>
-                  <button className="primary" onClick={() => setPhase("revealed")}>Reveal answers</button>
+                  <span className="amsg right">
+                    {joinedHere.length === 0 ? "No devices joined" : allIn ? "All units in" : "Waiting on answers"}
+                  </span>
+                  <button className="primary" onClick={() => { echo.current = ""; setPhase("revealed"); }}>
+                    Reveal answers
+                  </button>
                 </>)}
 
                 {phase === "revealed" && (<>
                   <span className="amsg">Discuss the answers, then score anything unscored.</span>
-                  <button className="ghost" onClick={() => { setOpenedAt(Date.now()); setPhase("open"); }}>
+                  <button className="ghost" onClick={() => {
+                    echo.current = ""; setOpenedAt(Date.now()); setPhase("open");
+                  }}>
                     Reopen
                   </button>
                 </>)}
@@ -777,14 +797,15 @@ function Host({ onExit }) {
 
               <div className="nav">
                 <button className="ghost" disabled={activeIdx === 0}
-                  onClick={() => { setActiveIdx((i) => i - 1); setPhase("briefing"); setConfirmNext(false); }}>Previous</button>
+                  onClick={() => { echo.current = ""; setActiveIdx((i) => i - 1); setPhase("briefing"); setConfirmNext(false); }}>Previous</button>
                 {activeIdx < model.injects.length - 1 ? (
                   confirmNext ? (
                     <span className="confirm">
                       <span className="cmsg">Move everyone to inject {model.injects[activeIdx + 1].id}?</span>
                       <button className="ghost" onClick={() => setConfirmNext(false)}>Cancel</button>
                       <button className="primary" onClick={() => {
-                        setActiveIdx((i) => i + 1); setPhase("briefing"); setConfirmNext(false);
+                        echo.current = ""; setActiveIdx((i) => i + 1);
+                        setPhase("briefing"); setConfirmNext(false);
                       }}>Yes, move on</button>
                     </span>
                   ) : (
