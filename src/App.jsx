@@ -11,7 +11,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v3";
-const BUILD = "b8";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b11";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 
@@ -41,6 +41,20 @@ const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } ca
 const lsDel = (k) => { try { localStorage.removeItem(k); } catch (e) { /* private mode */ } };
 
 /* ---------------------------- transport ---------------------------- */
+
+/* True once the answering window has closed. Recomputed on a tick so the
+   UI locks itself rather than relying on the server to refuse a tap. */
+function useExpired(openedAt, limit, active) {
+  const [over, setOver] = useState(false);
+  useEffect(() => {
+    if (!active || !limit || !openedAt) { setOver(false); return; }
+    const check = () => setOver(Date.now() - openedAt >= limit * 1000);
+    check();
+    const iv = setInterval(check, 250);
+    return () => clearInterval(iv);
+  }, [openedAt, limit, active]);
+  return over;
+}
 
 function useSocket(onMessage) {
   const ws = useRef(null);
@@ -241,46 +255,16 @@ class Boundary extends React.Component {
 /* ================================================================== */
 
 export default function App() {
-  const [mode, setMode] = useState(null);
+  const [mode, setMode] = useState("join");
   return (
     <div className="ttx">
       <style>{CSS}</style>
       <Boundary>
-        {mode === null && <Landing onPick={setMode} />}
-        {mode === "host" && <Host onExit={() => setMode(null)} />}
-        {mode === "join" && <Participant onExit={() => setMode(null)} />}
+        {mode === "host"
+          ? <Host onExit={() => setMode("join")} />
+          : <Participant onHost={() => setMode("host")} />}
       </Boundary>
     </div>
-  );
-}
-
-function Landing({ onPick }) {
-  const stale = lsGet(K_HOST) || lsGet(K_ME);
-  return (
-    <main className="landing">
-      <div className="landinner">
-        <span className="mark" aria-hidden="true" />
-        <h1>Tabletop exercise</h1>
-        <p className="lede">
-          Every business unit joins with its own code. They answer on one device
-          per unit, scored on whether they got it right and how fast.
-        </p>
-        <p className="build big">build {BUILD}</p>
-        <div className="picks">
-          <button className="pick" onClick={() => onPick("host")}>
-            <b>Run an exercise</b><span>Load your inject sheet and facilitate</span>
-          </button>
-          <button className="pick" onClick={() => onPick("join")}>
-            <b>Join an exercise</b><span>You have a code from the facilitator</span>
-          </button>
-        </div>
-        {stale && (
-          <button className="link small" onClick={() => { nukeAll(); location.reload(); }}>
-            Clear the session saved on this device
-          </button>
-        )}
-      </div>
-    </main>
   );
 }
 
@@ -417,7 +401,7 @@ function Host({ onExit }) {
   if (screen === "setup") {
     return (
       <>
-        <Bar left="Facilitator" onExit={onExit} conn={status} />
+        <Bar left="Facilitator setup" onExit={onExit} exitLabel="Back" conn={status} />
         <main className="load">
           <div className="loadinner">
             <h1>Load your inject sheet</h1>
@@ -451,7 +435,7 @@ function Host({ onExit }) {
   if (screen === "config") {
     return (
       <>
-        <Bar left="Setup" onExit={() => setScreen("setup")} exitLabel="Back" conn={status} />
+        <Bar left="Before you start" onExit={() => setScreen("setup")} exitLabel="Back" conn={status} />
         <main className="load">
           <div className="loadinner wide">
             <h1>Before you start</h1>
@@ -490,6 +474,9 @@ function Host({ onExit }) {
                   <Check label="Speed bonus" checked={settings.speedBonus}
                     onChange={(v) => patchSettings({ speedBonus: v })}
                     hint="A correct answer earns half the points, plus up to half again for answering early." />
+                  <Check label="Reveal automatically when time runs out" checked={settings.autoReveal}
+                    onChange={(v) => patchSettings({ autoReveal: v })}
+                    hint="Closes answering and moves the room to discussion the moment the clock hits zero." />
                   <Check label="Show leaderboard" checked={settings.leaderboard}
                     onChange={(v) => patchSettings({ leaderboard: v })}
                     hint="Ranking units against each other can make people defensive rather than candid. Off is the safer default for a first exercise." />
@@ -564,7 +551,7 @@ function Host({ onExit }) {
   if (!model || !inject) {
     return (
       <>
-        <Bar left="Facilitator" onExit={onExit} conn={status} />
+        <Bar left="Facilitator setup" onExit={onExit} exitLabel="Back" conn={status} />
         <div className="crash">
           <h1>This session is no longer on the server</h1>
           <p className="muted">It may have expired, or the service restarted without a volume.</p>
@@ -591,6 +578,11 @@ function Host({ onExit }) {
           }} />
         </>}
         right={<>
+          <button className={`ghost ${settings.showUnits ? "" : "off"}`}
+            title={settings.showUnits ? "Hide unit names on this screen" : "Show unit names"}
+            onClick={() => patchSettings({ showUnits: !settings.showUnits })}>
+            {settings.showUnits ? "Units shown" : "Units hidden"}
+          </button>
           <button className="ghost" onClick={() => setRoomOpen(true)}>
             Codes · {people.length}
           </button>
@@ -598,7 +590,8 @@ function Host({ onExit }) {
         </>} />
 
       {roomOpen && (
-        <RoomPanel {...{ codes, people, model, roleColor, label, unitOf }}
+        <RoomPanel {...{ codes, people, model, roleColor, label, unitOf, settings }}
+          onSetting={patchSettings}
           onClose={() => setRoomOpen(false)}
           onLobby={() => { setPhase("lobby"); setRoomOpen(false); }} />
       )}
@@ -689,13 +682,21 @@ function Host({ onExit }) {
                     const qs = inject.questions.filter((q) => q.peran === r);
                     const done = members.filter((p) => qs.every((q) => p.answers?.[q.qid]));
                     const pct = members.length ? Math.round((done.length / members.length) * 100) : 0;
+                    // finished when their slowest answer for this inject landed
+                    const finishedMs = done.length
+                      ? Math.max(...done.flatMap((p) => qs.map((q) => p.answers[q.qid]?.ms || 0)))
+                      : null;
                     return (
                       <div key={r} className="trow">
                         <span className="dot" style={{ background: roleColor(r) }} />
                         <span className="tname">{unitOf(r)}</span>
                         <span className="tbar"><i style={{ width: `${pct}%`, background: roleColor(r) }} /></span>
                         <span className="tcount">{done.length}/{members.length}</span>
-                        {members.length === 0 && <span className="tmiss">not joined</span>}
+                        {finishedMs != null
+                          ? <span className="tdone">{(finishedMs / 1000).toFixed(1)}s</span>
+                          : members.length === 0
+                            ? <span className="tmiss">not joined</span>
+                            : <span className="tmiss">answering</span>}
                       </div>
                     );
                   })}
@@ -803,7 +804,7 @@ function Lobby({ codes, people, model, roleColor, label, unitOf, onBegin, inject
   );
 }
 
-function RoomPanel({ codes, people, model, roleColor, label, unitOf, onClose, onLobby }) {
+function RoomPanel({ codes, people, model, roleColor, label, unitOf, settings, onSetting, onClose, onLobby }) {
   useEffect(() => {
     const esc = (e) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", esc);
@@ -836,6 +837,18 @@ function RoomPanel({ codes, people, model, roleColor, label, unitOf, onClose, on
             );
           })}
         </ul>
+        <h3>On-screen display</h3>
+        <label className="chk">
+          <input type="checkbox" checked={settings.showUnits}
+            onChange={(e) => onSetting({ showUnits: e.target.checked })} />
+          <span><b>Unit names</b><em>Off shows Unit A, Unit B instead of the real Peran.</em></span>
+        </label>
+        <label className="chk">
+          <input type="checkbox" checked={settings.showNames}
+            onChange={(e) => onSetting({ showNames: e.target.checked })} />
+          <span><b>Device names</b><em>Off hides who is operating each device.</em></span>
+        </label>
+
         <button className="ghost wide" onClick={onLobby}>Back to the waiting room</button>
         <p className="hint">
           Sends every device back to standby. Your scores and notes are kept.
@@ -988,7 +1001,7 @@ const Check = ({ label, checked, onChange, hint }) => (
 
 /* =========================== PARTICIPANT =========================== */
 
-function Participant({ onExit }) {
+function Participant({ onHost }) {
   const [me, setMe] = useState(null);
   const [codeIn, setCodeIn] = useState("");
   const [nameIn, setNameIn] = useState("");
@@ -1028,43 +1041,57 @@ function Participant({ onExit }) {
     setBooted(true);
   }, [send]);
 
-  const leave = () => { nukeAll(); setMe(null); setDeck(null); setState(null); onExit(); };
+  const leave = () => { nukeAll(); setMe(null); setDeck(null); setState(null); };
 
   if (!booted) return <div className="boot">Loading</div>;
 
-  /* ---- join ---- */
+  /* ---- join: this is the front door for everyone but the facilitator ---- */
   if (!me || !deck) {
+    const ready = codeIn.length >= 4;
     return (
-      <>
-        <Bar left="Join" onExit={onExit} conn={status} />
-        <main className="load">
-          <div className="loadinner narrow">
-            <h1>Join</h1>
-            <label className="fld">
-              <span>Your unit's code</span>
-              <input className="codein" value={codeIn} maxLength={8} placeholder="ABCD"
-                onChange={(e) => { setCodeIn(e.target.value.toUpperCase()); setFoundPeran(""); }}
-                onBlur={() => codeIn.length >= 4 && send({ t: "peek", code: codeIn })} />
-            </label>
-            {foundPeran && <div className="found">You'll join as <b>{foundPeran}</b></div>}
-            <label className="fld">
-              <span>Name on this device (optional)</span>
-              <input value={nameIn} onChange={(e) => setNameIn(e.target.value)}
-                placeholder="Who is operating it" />
-            </label>
-            {msg && <div className="err">{msg}</div>}
-            <button className="primary big" disabled={codeIn.length < 4}
-              onClick={() => send({ t: "join", code: codeIn, name: nameIn })}>
-              Join
-            </button>
-            {me && (
-              <button className="link small" onClick={leave}>
-                Clear the session saved on this device
+      <main className="door">
+        <div className="doorinner">
+          <span className="mark" aria-hidden="true" />
+          <h1>Tabletop exercise</h1>
+          <p className="lede">Enter the code for your business unit.</p>
+
+          <input className="codein" value={codeIn} maxLength={8} placeholder="————"
+            autoComplete="off" autoCapitalize="characters" spellCheck="false"
+            aria-label="Your unit's code"
+            onChange={(e) => {
+              const v = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+              setCodeIn(v); setFoundPeran("");
+              if (v.length >= 4) send({ t: "peek", code: v });
+            }}
+            onKeyDown={(e) => e.key === "Enter" && ready && send({ t: "join", code: codeIn, name: nameIn })} />
+
+          <div className={`resolve ${foundPeran ? "hit" : msg ? "miss" : ""}`}>
+            {foundPeran
+              ? <>Joining as <b>{foundPeran}</b></>
+              : msg || (ready ? "Checking…" : "Four characters, from the facilitator")}
+          </div>
+
+          <label className="fld">
+            <span>Who's on this device <em>optional</em></span>
+            <input value={nameIn} onChange={(e) => setNameIn(e.target.value)}
+              placeholder="Name or desk" autoComplete="off" />
+          </label>
+
+          <button className="primary big" disabled={!foundPeran}
+            onClick={() => send({ t: "join", code: codeIn, name: nameIn })}>
+            Join
+          </button>
+
+          <div className="doorfoot">
+            <button className="link" onClick={onHost}>Running this exercise? Set it up</button>
+            {(lsGet(K_ME) || lsGet(K_HOST)) && (
+              <button className="link quiet" onClick={() => { nukeAll(); location.reload(); }}>
+                Clear saved session
               </button>
             )}
           </div>
-        </main>
-      </>
+        </div>
+      </main>
     );
   }
 
@@ -1072,6 +1099,7 @@ function Participant({ onExit }) {
   const inject = deck.injects?.[state?.activeIdx ?? 0];
   const mine = inject?.questions || [];
   const limit = state?.limit ?? inject?.limit ?? settings?.timeLimit ?? 0;
+  const timeUp = useExpired(state?.openedAt, settings?.mode === "auto" ? limit : 0, phase === "open");
 
   return (
     <>
@@ -1110,6 +1138,7 @@ function Participant({ onExit }) {
                   {limit > 0 && settings?.mode === "auto" && (
                     <Countdown openedAt={state.openedAt} limit={limit} big />
                   )}
+                  {timeUp && <div className="timeup">Time is up. Answers are closed.</div>}
                   {mine.map((q) => {
                     const sent = me.answers?.[q.qid];
                     const isMC = q.type === "choice" && q.choices?.length && settings.mode === "auto";
@@ -1120,8 +1149,8 @@ function Participant({ onExit }) {
                           <div className="opts">
                             {q.choices.map((c, i) => (
                               <button key={i}
-                                className={`opt ${sent ? (sent.choice === i ? "picked" : "dim") : ""}`}
-                                disabled={!!sent}
+                                className={`opt ${sent ? (sent.choice === i ? "picked" : "dim") : ""} ${timeUp && !sent ? "dim" : ""}`}
+                                disabled={!!sent || timeUp}
                                 onClick={() => send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: i } })}>
                                 <span className="oletter">{String.fromCharCode(65 + i)}</span>
                                 <span className="otext">{c.text}</span>
@@ -1131,10 +1160,10 @@ function Participant({ onExit }) {
                           </div>
                         ) : (
                           <>
-                            <textarea rows={5} placeholder="Type your unit's answer"
+                            <textarea rows={5} placeholder="Type your unit's answer" disabled={timeUp}
                               value={drafts[q.qid] ?? sent?.text ?? ""}
                               onChange={(e) => setDrafts((d) => ({ ...d, [q.qid]: e.target.value }))} />
-                            <button className="primary big"
+                            <button className="primary big" disabled={timeUp}
                               onClick={() => send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: drafts[q.qid] ?? "" } })}>
                               {sent ? "Update answer" : "Send answer"}
                             </button>
@@ -1317,7 +1346,7 @@ function Bar({ left, right, onExit, exitLabel = "Exit", conn, dark }) {
       <div className="barright">
         {conn && conn !== "live" && <span className="offline">Reconnecting</span>}
         {right}
-        <span className="build">{BUILD}</span>
+        {dark && <span className="build">{BUILD}</span>}
         <button className="ghost" onClick={onExit}>{exitLabel}</button>
       </div>
     </header>
@@ -1390,6 +1419,9 @@ const CSS = `
 .ttx .ghost:hover:not(:disabled){border-color:var(--muted)}
 .ttx .ghost:disabled{opacity:.35;cursor:default}
 .ttx .ghost.wide{width:100%;padding:11px;margin-top:20px;text-align:center}
+.ttx .bar.dark .ghost.off{color:#7E8F8D;border-style:dashed}
+.panel .chk{margin-bottom:14px}
+.panel h3{margin-top:26px}
 .ttx .danger{padding:8px 16px;border:1px solid #D9B1A5;color:var(--alert);border-radius:5px;font-size:13px}
 .ttx .danger:hover{background:#FBF0EC}
 .ttx .link{color:var(--accent);text-decoration:underline;text-underline-offset:3px;font-size:14px}
@@ -1421,6 +1453,23 @@ const CSS = `
 .steps li.now button{background:#1E3D44;color:#fff;font-weight:500;box-shadow:inset 0 0 0 1px #2F5A60}
 .steps li+li{position:relative;padding-left:9px}
 .steps li+li::before{content:"";position:absolute;left:2px;top:50%;width:4px;height:1px;background:#2C4048}
+
+/* ---------- door (join is the front page) ---------- */
+.door{display:flex;justify-content:center;padding:64px 22px 90px}
+.doorinner{max-width:380px;width:100%}
+.doorinner .mark{display:block;width:4px;height:26px;background:var(--accent);border-radius:2px;margin-bottom:24px}
+.doorinner h1{margin-bottom:6px}
+.doorinner .lede{margin-bottom:22px}
+.doorinner .codein{margin-bottom:10px;border-width:1.5px}
+.resolve{min-height:22px;font-size:13.5px;color:var(--muted);text-align:center;margin-bottom:22px}
+.resolve.hit{color:var(--good)}
+.resolve.hit b{font-weight:600}
+.resolve.miss{color:var(--alert)}
+.doorinner .fld>span{display:flex;align-items:baseline;gap:7px}
+.doorinner .fld em{font-style:normal;font-size:11.5px;color:var(--muted);font-weight:400}
+.doorfoot{margin-top:30px;padding-top:20px;border-top:1px solid var(--rule);
+  display:flex;flex-direction:column;gap:10px;align-items:flex-start}
+.ttx .link.quiet{color:var(--muted);font-size:12.5px}
 
 /* ---------- landing ---------- */
 .landing{display:flex;justify-content:center;padding:76px 24px}
@@ -1564,6 +1613,9 @@ const CSS = `
 .tcount{font-family:var(--mono);font-size:12.5px;color:var(--muted)}
 .tmiss{color:var(--muted);font-size:12.5px}
 .tin{color:var(--good);font-size:12.5px}
+.tdone{font-family:var(--mono);font-size:12px;color:var(--good);min-width:46px;text-align:right}
+.timeup{margin:-8px 0 20px;padding:11px 14px;background:#FBF0EC;border-left:3px solid var(--alert);
+  border-radius:0 5px 5px 0;font-size:13.5px;color:#7C2B16;text-align:center;font-weight:500}
 
 /* ---------- question cards ---------- */
 .rolegroup{margin-bottom:28px}
