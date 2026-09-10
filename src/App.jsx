@@ -11,7 +11,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v3";
-const BUILD = "b16";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b17";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -303,6 +303,7 @@ function Host({ onExit }) {
   const [phase, setPhase] = useState("lobby");
   const [activeIdx, setActiveIdx] = useState(0);
   const [openedAt, setOpenedAt] = useState(null);
+  const [keyShown, setKeyShown] = useState(false);
   const [people, setPeople] = useState([]);
   const [scores, setScores] = useState({});
   const [notes, setNotes] = useState({});
@@ -321,12 +322,14 @@ function Host({ onExit }) {
     if (m.t === "hosted") {
       setRoomId(m.roomId); setCodes(m.codes); setSettings(m.settings); setTimes(m.times || {});
       setActiveIdx(m.state.activeIdx); setPhase(m.state.phase);
+      setKeyShown(!!m.state.keyShown);
       setOpenedAt(m.state.openedAt); setScreen("run");
     } else if (m.t === "state") {
       /* remember what arrived so the push effect below doesn't echo it back */
       echo.current = `${m.activeIdx}:${m.phase}`;
       setActiveIdx(m.activeIdx);
       setPhase(m.phase);
+      setKeyShown(!!m.keyShown);
       if (m.openedAt) setOpenedAt(m.openedAt);
     } else if (m.t === "roster") setPeople(m.people || []);
     else if (m.t === "settings") { setSettings(m.settings); if (m.times) setTimes(m.times); }
@@ -732,7 +735,16 @@ function Host({ onExit }) {
                 </>)}
 
                 {phase === "revealed" && (<>
-                  <span className="amsg">Discuss the answers, then score anything unscored.</span>
+                  <span className="amsg">
+                    {keyShown
+                      ? "Answer key is on every screen."
+                      : "Discuss first. Reveal the key when the room has argued it out."}
+                  </span>
+                  {!keyShown && (
+                    <button className="primary" onClick={() => send({ t: "showkey", roomId })}>
+                      Show correct answers
+                    </button>
+                  )}
                   <button className="ghost" onClick={() => {
                     echo.current = ""; setOpenedAt(Date.now()); setPhase("open");
                   }}>
@@ -773,7 +785,7 @@ function Host({ onExit }) {
                 <div key={peran} className="rolegroup">
                   <div className="rolerule" style={{ "--c": roleColor(peran) }}>{unitOf(peran)}</div>
                   {inject.questions.filter((q) => q.peran === peran).map((q) => (
-                    <QuestionResult key={q.qid} {...{ q, settings, roleColor, label }}
+                    <QuestionResult key={q.qid} {...{ q, settings, roleColor, label, keyShown }}
                       answers={answeredBy(q)}
                       sc={scores[q.qid] || {}}
                       onScore={(patch) => setScore(q.qid, patch)}
@@ -947,7 +959,7 @@ function RoomPanel({ codes, people, model, roleColor, label, unitOf, settings, o
   );
 }
 
-function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggleExpected, label }) {
+function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggleExpected, label, keyShown }) {
   const isAuto = settings.mode === "auto" && q.type === "choice";
   const correctIdx = q.choices?.findIndex((c) => c.correct);
 
@@ -967,26 +979,26 @@ function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggl
         <>
           <ul className="dist">
             {dist.map((c) => (
-              <li key={c.i} className={c.correct ? "right" : ""}>
+              <li key={c.i} className={keyShown && c.correct ? "right" : ""}>
                 <span className="dlabel">{c.text}</span>
-                {c.correct && <span className="keytag">correct</span>}
+                {keyShown && c.correct && <span className="keytag">correct</span>}
                 <span className="dbar"><i style={{ width: `${(c.n / total) * 100}%` }} /></span>
                 <span className="dn">{c.n}</span>
               </li>
             ))}
           </ul>
-          {correctIdx < 0 && (
+          {keyShown && correctIdx < 0 && (
             <p className="hint warnhint">No correct option marked in your sheet, so nobody scored.</p>
           )}
           <ul className="who-list">
             {answers.map((p) => {
               const a = p.answers[q.qid];
               return (
-                <li key={p.pid} className={a.correct ? "ok" : a.correct === false ? "no" : ""}>
+                <li key={p.pid} className={!keyShown ? "" : a.correct ? "ok" : a.correct === false ? "no" : ""}>
                   {a.rank && <span className="rk">{a.rank}</span>}
                   <span>{label(p)}</span>
                   <span className="ms">{(a.ms / 1000).toFixed(1)}s</span>
-                  <span className="pts">{a.points ? `+${a.points}` : "0"}</span>
+                  <span className="pts">{keyShown ? (a.points ? `+${a.points}` : "0") : "—"}</span>
                 </li>
               );
             })}
@@ -1110,7 +1122,8 @@ function Participant() {
       setMe(rec); lsSet(K_ME, rec);
       setDeck(m.deck); setState(m.state); setSettings(m.settings); setMsg("");
     } else if (m.t === "codeok") { setFoundPeran(m.peran); setMsg(""); }
-    else if (m.t === "state") setState({ activeIdx: m.activeIdx, phase: m.phase, openedAt: m.openedAt });
+    else if (m.t === "state") setState({ activeIdx: m.activeIdx, phase: m.phase,
+      openedAt: m.openedAt, limit: m.limit, keyShown: !!m.keyShown });
     else if (m.t === "settings") setSettings(m.settings);
     else if (m.t === "ack") {
       setMe((p) => { const n = { ...p, answers: m.me.answers, total: m.me.total }; lsSet(K_ME, n); return n; });
@@ -1120,6 +1133,7 @@ function Participant() {
     else if (m.t === "timeup") setMsg("Time is up for this question.");
     else if (m.t === "nosuch") { setFoundPeran(""); setMsg("No exercise found with that code."); }
     else if (m.t === "key") setKey(m.key || {});
+    else if (m.t === "keyclear") setKey({});
     else if (m.t === "left") { lsDel(K_ME); setMe(null); setDeck(null); setState(null); }
     else if (m.t === "gone" || m.t === "ended") { lsDel(K_ME); setMe(null); setDeck(null); setState(null); }
   }, []);
@@ -1213,7 +1227,7 @@ function Participant() {
     <>
       <Bar dark onExit={leave} exitLabel="Leave" conn={status}
         left={<b className="unitname">{me.peran}</b>}
-        right={settings?.mode === "auto" && settings?.leaderboard
+        right={settings?.mode === "auto" && settings?.leaderboard && state?.keyShown
           ? <span className="ptsbadge">{(me.total || 0).toLocaleString()}</span> : null} />
       <main className="pmain">
         <div className="pinner">
@@ -1303,22 +1317,26 @@ function Participant() {
                           </div>
                         );
                         return (
-                          <div className={`rescard ${a.correct ? "ok" : a.correct === false ? "no" : ""}`} key={q.qid}>
+                          <div className={`rescard ${!state?.keyShown ? "" : a.correct ? "ok" : a.correct === false ? "no" : ""}`} key={q.qid}>
                             <p className="qtext">{q.text}</p>
                             <p className="rpick">You chose: {a.text}</p>
                             {key[q.qid] && !a.correct && (
                               <p className="rkey">Correct answer: <b>{key[q.qid].text}</b></p>
                             )}
                             <p className="rline">
-                              {a.correct == null ? "Not auto-scored" : a.correct ? "Correct" : "Incorrect"}
+                              {!state?.keyShown
+                                ? "Answer sent"
+                                : a.correct == null ? "Not auto-scored" : a.correct ? "Correct" : "Incorrect"}
                               {" · "}{(a.ms / 1000).toFixed(1)}s
                               {a.rank ? ` · ${a.rank}${a.rank === 1 ? "st" : a.rank === 2 ? "nd" : a.rank === 3 ? "rd" : "th"} to answer` : ""}
-                              {" · "}<b>{a.points || 0} pts</b>
+                              {state?.keyShown && <>{" · "}<b>{a.points || 0} pts</b></>}
                             </p>
                           </div>
                         );
                       })}
-                      {settings?.leaderboard && <p className="bigpts">{me.total || 0} pts total</p>}
+                      {settings?.leaderboard && state?.keyShown && (
+                        <p className="bigpts">{me.total || 0} pts total</p>
+                      )}
                       <p className="muted small">The facilitator is leading the discussion.</p>
                     </div>
                   ) : (
