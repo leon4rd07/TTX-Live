@@ -41,6 +41,7 @@ const DEFAULTS = {
   timeLimit: 60,      // seconds to answer, 0 for none
   points: 1000,
   speedBonus: true,
+  autoReveal: true,
   showNames: true,
   showUnits: true,
   leaderboard: true,
@@ -97,6 +98,27 @@ function newCode() {
 }
 
 const send = (ws, msg) => { if (ws.readyState === 1) ws.send(JSON.stringify(msg)); };
+
+const revealTimers = new Map(); // roomId -> timeout
+function clearReveal(roomId) {
+  const t = revealTimers.get(roomId);
+  if (t) { clearTimeout(t); revealTimers.delete(roomId); }
+}
+function armReveal(room) {
+  clearReveal(room.id);
+  const inj = room.deck.injects[room.state.activeIdx];
+  const limit = limitFor(room, inj?.id);
+  if (!room.settings.autoReveal || !limit) return;
+  const fireIn = limit * 1000 + 1200; // small grace for in-flight answers
+  revealTimers.set(room.id, setTimeout(() => {
+    const r = rooms.get(room.id);
+    if (!r || r.state.phase !== "open") return;
+    r.state = { ...r.state, phase: "revealed" };
+    toRoom(r.id, { t: "state", ...r.state });
+    toRoom(r.id, { t: "roster", people: Object.values(r.people) }, true);
+    markSnapshot();
+  }, fireIn));
+}
 
 function toRoom(roomId, msg, hostOnly = false) {
   const raw = JSON.stringify(msg);
@@ -258,6 +280,7 @@ wss.on("connection", (ws) => {
         byId.state = { activeIdx: m.activeIdx, phase: m.phase, openedAt,
           limit: inj0 ? limitFor(byId, inj0.id) : byId.settings.timeLimit };
         toRoom(byId.id, { t: "state", ...byId.state });
+        if (m.phase === "open") armReveal(byId); else clearReveal(byId.id);
         markDirty(byId.id);
         markSnapshot();
         break;
@@ -273,7 +296,7 @@ wss.on("connection", (ws) => {
         const inj = room.deck.injects[room.state.activeIdx];
         const elapsed = room.state.openedAt ? Date.now() - room.state.openedAt : 0;
         const limit = limitFor(room, inj?.id);
-        if (limit && elapsed > limit * 1000 + 2000) return send(ws, { t: "timeup" });
+        if (limit && elapsed > limit * 1000 + 800) return send(ws, { t: "timeup" });
 
         for (const [qid, val] of Object.entries(m.answers || {})) {
           const q = inj?.questions.find((x) => x.qid === qid);
@@ -307,6 +330,7 @@ wss.on("connection", (ws) => {
       case "end": {
         if (!byId || !sockets.get(ws)?.isHost) return;
         toRoom(byId.id, { t: "ended" });
+        clearReveal(byId.id);
         dropRoom(byId);
         snapshot();
         break;
