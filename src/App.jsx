@@ -11,7 +11,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v3";
-const BUILD = "b17";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b18";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -307,7 +307,6 @@ function Host({ onExit }) {
   const [people, setPeople] = useState([]);
   const [scores, setScores] = useState({});
   const [notes, setNotes] = useState({});
-  const [meta, setMeta] = useState({});
   const [revealKey, setRevealKey] = useState({});
   const [roomOpen, setRoomOpen] = useState(false);
   const [confirmNext, setConfirmNext] = useState(false);
@@ -348,7 +347,7 @@ function Host({ onExit }) {
     const s = lsGet(K_HOST);
     if (s?.roomId && s?.model) {
       setRoomId(s.roomId); setModel(s.model); setFileName(s.fileName || "");
-      setScores(s.scores || {}); setNotes(s.notes || {}); setMeta(s.meta || {});
+      setScores(s.scores || {}); setNotes(s.notes || {});
       setCodes(s.codes || {}); setSettings(s.settings || settings); setTimes(s.times || {});
       setScreen("run");
       send({ t: "rehost", roomId: s.roomId });
@@ -360,10 +359,10 @@ function Host({ onExit }) {
   useEffect(() => {
     if (!booted || !model || !roomId) return;
     const t = setTimeout(() => {
-      lsSet(K_HOST, { roomId, model, fileName, scores, notes, meta, codes, settings, times });
+      lsSet(K_HOST, { roomId, model, fileName, scores, notes, codes, settings, times });
     }, 500);
     return () => clearTimeout(t);
-  }, [booted, model, roomId, fileName, scores, notes, meta, codes, settings, times]);
+  }, [booted, model, roomId, fileName, scores, notes, codes, settings, times]);
 
   useEffect(() => {
     if (!roomId || screen !== "run") return;
@@ -385,7 +384,7 @@ function Host({ onExit }) {
     setWarnings(built.warnings); setFileName(name); setParseError("");
     setDraftCodes(Object.fromEntries(built.roles.map((r) => [r, rand(4)])));
     setTimes(Object.fromEntries(built.injects.map((i) => [i.id, i.window ? String(Math.round(Number(i.window) * 60)) : ""])));
-    setScores({}); setNotes({}); setMeta({}); setActiveIdx(0); setPhase("lobby");
+    setScores({}); setNotes({}); setActiveIdx(0); setPhase("lobby");
     setScreen("config");
   }
 
@@ -430,8 +429,6 @@ function Host({ onExit }) {
 
   const setScore = (qid, patch) =>
     setScores((s) => ({ ...s, [qid]: { score: null, decision: null, ...(s[qid] || {}), ...patch } }));
-  const setIMeta = (id, patch) =>
-    setMeta((m) => ({ ...m, [id]: { target: "", decidedAt: null, ...(m[id] || {}), ...patch } }));
 
   const inject = model?.injects[activeIdx];
   const unitOf = (peran) => {
@@ -451,7 +448,8 @@ function Host({ onExit }) {
             <h1>Load your inject sheet</h1>
             <p className="lede">
               One row per question, with <b>Inject No.</b>, <b>Condition</b>, <b>Peran</b>,{" "}
-              <b>Siklus</b>, <b>Question</b> and <b>Answer</b>. Optional <b>Window</b> in minutes.
+              <b>Siklus</b>, <b>Question</b> and <b>Answer</b>. Optional <b>Window</b> sets the
+              answering time for that inject, in minutes.
             </p>
             <p className="lede">
               For multiple choice, put each option on its own line in the Answer cell
@@ -539,8 +537,9 @@ function Host({ onExit }) {
               <>
                 <h3>Time per inject</h3>
                 <p className="hint">
-                  Blank uses the {settings.timeLimit}s default. Seeded from the Window column
-                  if your sheet has one. Editable during the exercise too.
+                  How long each unit gets to answer. Blank uses the {settings.timeLimit}s
+                  default. Seeded from the Window column if your sheet has one, and editable
+                  during the exercise.
                 </p>
                 <ul className="codelist">
                   {model.injects.map((i) => (
@@ -599,7 +598,7 @@ function Host({ onExit }) {
 
   /* ---- report ---- */
   if (screen === "report") {
-    return <Report {...{ model, scores, notes, meta, people, settings, roleColor, fileName, label, unitOf }}
+    return <Report {...{ model, scores, notes, people, settings, roleColor, fileName, label, unitOf }}
       onBack={() => setScreen("run")} onEnd={endSession} />;
   }
 
@@ -797,7 +796,6 @@ function Host({ onExit }) {
 
               {phase === "revealed" && (
                 <>
-                  <DecisionBar {...{ inject, meta, setIMeta }} />
                   <div className="notes">
                     <label htmlFor={`n-${inject.id}`}>Facilitator notes</label>
                     <textarea id={`n-${inject.id}`} rows={3} value={notes[inject.id] || ""}
@@ -1047,37 +1045,6 @@ function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggl
           </div>
           {showExpected && q.answerRaw && <p className="model">{q.answerRaw}</p>}
         </>
-      )}
-    </div>
-  );
-}
-
-function DecisionBar({ inject, meta, setIMeta }) {
-  const m = meta[inject.id] || {};
-  const preset = m.target || inject.window || "";
-  const target = preset ? Number(preset) * 60 : null;
-  const decided = m.decidedAt;
-  const over = target != null && decided != null ? decided - target : null;
-  const [t0] = useState(Date.now());
-  return (
-    <div className={`decbar ${decided != null ? (over > 0 ? "late" : "ontime") : ""}`}>
-      <label htmlFor={`w-${inject.id}`}>Decision window</label>
-      <input id={`w-${inject.id}`} type="number" min="0" placeholder="—" value={preset}
-        onChange={(e) => setIMeta(inject.id, { target: e.target.value })} />
-      <span className="unit">min</span>
-      {decided != null ? (
-        <>
-          <span className="verdict">
-            Decided at {fmt(decided)}
-            {over != null && (over > 0 ? ` · ${fmt(over)} over` : ` · ${fmt(Math.abs(over))} inside`)}
-          </span>
-          <button className="undo" onClick={() => setIMeta(inject.id, { decidedAt: null })}>Undo</button>
-        </>
-      ) : (
-        <button className="undo"
-          onClick={() => setIMeta(inject.id, { decidedAt: Math.round((Date.now() - t0) / 1000) })}>
-          Mark decision reached
-        </button>
       )}
     </div>
   );
@@ -1357,7 +1324,7 @@ function Participant() {
 
 /* ============================= REPORT ============================= */
 
-function Report({ model, scores, notes, meta, people, settings, roleColor, fileName, label, unitOf, onBack, onEnd }) {
+function Report({ model, scores, notes, people, settings, roleColor, fileName, label, unitOf, onBack, onEnd }) {
   const all = useMemo(() => model.injects.flatMap((i) =>
     i.questions.map((q) => ({ ...q, injectId: i.id, siklus: i.siklus }))), [model]);
 
@@ -1385,10 +1352,10 @@ function Report({ model, scores, notes, meta, people, settings, roleColor, fileN
   function exportCSV() {
     const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
     const head = ["Siklus", "Inject", "Peran", "Question", "Expected", "Device", "Answer",
-      "Correct", "Seconds", "Points", "Quality", "Decision", "Window", "Notes"];
+      "Correct", "Seconds", "Points", "Quality", "Decision", "Answer window (s)", "Notes"];
     const lines = [head.map(esc).join(",")];
     model.injects.forEach((inj) => {
-      const m = meta[inj.id] || {};
+      const win = inj.window ? Math.round(Number(inj.window) * 60) : "";
       inj.questions.forEach((q) => {
         const sc = scores[q.qid] || {};
         const rs = people.filter((p) => p.peran === q.peran && p.answers?.[q.qid]);
@@ -1400,7 +1367,7 @@ function Report({ model, scores, notes, meta, people, settings, roleColor, fileN
             a ? (a.ms / 1000).toFixed(1) : "", a?.points ?? "",
             sc.score != null ? SCORE_LABELS[sc.score] : "",
             sc.decision ? DECISION_OPTS.find((d) => d.k === sc.decision)?.label : "",
-            m.target || inj.window || "", notes[inj.id] || ""].map(esc).join(","));
+            win, notes[inj.id] || ""].map(esc).join(","));
         });
       });
     });
@@ -1808,17 +1775,6 @@ const CSS = `
 .ttx .reveal{font-size:13px;color:var(--accent);text-decoration:underline;text-underline-offset:3px}
 .model{margin:13px 0 0;padding-top:13px;border-top:1px dashed var(--rule);white-space:pre-line;
   font-family:var(--serif);font-size:14.5px;line-height:1.6;color:var(--ink2)}
-.decbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:24px 0;padding:12px 15px;
-  background:var(--panel);border:1px solid var(--rule);border-radius:7px;font-size:13px}
-.decbar label{color:var(--ink2);font-weight:500}
-.decbar input{width:58px;font-family:var(--mono);text-align:center;padding:5px 6px;background:var(--paper)}
-.verdict{margin-left:auto;font-family:var(--mono);font-size:12.5px}
-.ttx .undo{margin-left:auto;font-size:12.5px;color:var(--accent);text-decoration:underline;text-underline-offset:3px}
-.ttx .decbar .verdict+.undo{margin-left:0}
-.decbar.ontime{border-color:#A9C7B4;background:#F1F8F3}
-.decbar.ontime .verdict{color:var(--good)}
-.decbar.late{border-color:#DEB4A6;background:#FBF0EC}
-.decbar.late .verdict{color:var(--alert)}
 .notes{margin-top:28px}
 .notes label{display:block;font-size:13px;font-weight:500;color:var(--ink2);margin-bottom:7px}
 .nav{display:flex;justify-content:space-between;margin-top:28px;padding-top:22px;border-top:1px solid var(--rule)}
